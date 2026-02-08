@@ -23,14 +23,16 @@ INSIGHT_FIELDS = "spend,impressions,clicks,ctr,cpc,actions,action_values"
 _rate_lock = threading.Lock()
 _usage_pct: float = 0.0          # last known API usage percentage (0-100)
 _last_call_ts: float = 0.0       # timestamp of last API call
+_rate_limited_until: float = 0.0  # don't make any calls before this time
+_consecutive_rate_limits: int = 0  # track consecutive rate limits for global backoff
 
 # Delay thresholds based on usage %
 _DELAY_MAP = [
-    (80, 10.0),   # >=80% usage → 10s between calls
-    (60, 5.0),    # >=60% → 5s
-    (40, 2.0),    # >=40% → 2s
-    (20, 1.0),    # >=20% → 1s
-    (0, 0.3),     # <20%  → 0.3s
+    (80, 15.0),   # >=80% usage → 15s between calls
+    (60, 8.0),    # >=60% → 8s
+    (40, 4.0),    # >=40% → 4s
+    (20, 2.0),    # >=20% → 2s
+    (0, 0.5),     # <20%  → 0.5s
 ]
 
 # ── Sync lock per account ────────────────────────────────────────
@@ -52,7 +54,27 @@ def _get_adaptive_delay() -> float:
         for threshold, delay in _DELAY_MAP:
             if _usage_pct >= threshold:
                 return delay
-    return 0.3
+    return 0.5
+
+
+def _mark_rate_limited(backoff_seconds: float) -> None:
+    """Mark that we've been rate limited — all subsequent calls must wait."""
+    global _usage_pct, _rate_limited_until, _consecutive_rate_limits
+    with _rate_lock:
+        _usage_pct = 100.0  # Force max delay for future calls
+        _rate_limited_until = time.time() + backoff_seconds
+        _consecutive_rate_limits += 1
+    logger.info(
+        f"Rate limit flagged: no API calls for {backoff_seconds:.0f}s "
+        f"(consecutive: {_consecutive_rate_limits})"
+    )
+
+
+def _clear_rate_limit() -> None:
+    """Clear rate limit flag after a successful call."""
+    global _consecutive_rate_limits
+    with _rate_lock:
+        _consecutive_rate_limits = 0
 
 
 def _update_usage_from_headers(headers: httpx.Headers) -> None:
@@ -72,8 +94,8 @@ def _update_usage_from_headers(headers: httpx.Headers) -> None:
                         if val > max_pct:
                             max_pct = val
             with _rate_lock:
-                _usage_pct = max_pct
-            if max_pct >= 50:
+                _usage_pct = max(max_pct, _usage_pct * 0.8)  # decay slowly
+            if max_pct >= 40:
                 logger.info(f"Meta API usage: {max_pct:.0f}% (delay: {_get_adaptive_delay():.1f}s)")
             return
         except (json.JSONDecodeError, TypeError):
@@ -90,22 +112,31 @@ def _update_usage_from_headers(headers: httpx.Headers) -> None:
                 data.get("total_time", 0),
             )
             with _rate_lock:
-                _usage_pct = max_pct
-            if max_pct >= 50:
+                _usage_pct = max(max_pct, _usage_pct * 0.8)
+            if max_pct >= 40:
                 logger.info(f"Meta API usage (app): {max_pct:.0f}%")
         except (json.JSONDecodeError, TypeError):
             pass
 
 
 def _adaptive_wait() -> None:
-    """Wait the appropriate amount based on current rate limit usage."""
+    """Wait the appropriate amount based on current rate limit state."""
     global _last_call_ts
+
+    # First: respect any hard rate-limit cooldown
+    with _rate_lock:
+        now = time.time()
+        if _rate_limited_until > now:
+            wait_for = _rate_limited_until - now
+            logger.info(f"Global rate-limit cooldown: waiting {wait_for:.0f}s")
+            time.sleep(wait_for)
+
+    # Then: apply adaptive delay between calls
     delay = _get_adaptive_delay()
     with _rate_lock:
         elapsed = time.time() - _last_call_ts
         if elapsed < delay:
-            sleep_for = delay - elapsed
-            time.sleep(sleep_for)
+            time.sleep(delay - elapsed)
         _last_call_ts = time.time()
 
 
@@ -122,7 +153,7 @@ def _graph_get(
     params: dict | None = None,
     retries: int = 3,
 ) -> dict:
-    """Make a GET request to the Graph API with adaptive delays and retry on rate limit."""
+    """Make a GET request to the Graph API with global backoff on rate limit."""
     params = params or {}
     params["access_token"] = access_token
     url = f"{GRAPH_BASE}/{path}" if not path.startswith("http") else path
@@ -137,17 +168,19 @@ def _graph_get(
         data = resp.json()
 
         if resp.status_code == 200:
+            _clear_rate_limit()
             return data
 
         error = data.get("error", {})
         code = error.get("code")
 
         if code in (17, 32, 4) and attempt < retries:
-            # Exponential backoff: 30s, 60s, 120s
-            wait = 30 * (2 ** attempt)
+            # Exponential backoff: 60s, 120s, 240s — and block ALL calls globally
+            wait = 60 * (2 ** attempt)
+            _mark_rate_limited(wait)
             logger.warning(
-                f"Rate limited (code {code}, usage ~{_usage_pct:.0f}%), "
-                f"waiting {wait}s before retry {attempt + 1}/{retries}"
+                f"Rate limited (code {code}), "
+                f"global backoff {wait}s — retry {attempt + 1}/{retries}"
             )
             time.sleep(wait)
             continue
@@ -250,6 +283,9 @@ def get_ad_sets(client: httpx.Client, access_token: str, account_id: str) -> lis
 BATCH_SIZE = 50  # Meta allows max 50 per batch
 
 
+BATCH_RETRIES = 3
+
+
 def _batch_insights(
     client: httpx.Client,
     access_token: str,
@@ -260,6 +296,8 @@ def _batch_insights(
     Fetch daily insight breakdowns for multiple ad sets in a single batch API call.
     Returns {ad_set_id: [daily_rows]} for each ad set.
     Meta Batch API: POST / with batch=[{method,relative_url},...] (max 50 per call).
+    On rate limit, retries the same batch with exponential backoff (never falls back
+    to individual calls, which would make the rate limit worse).
     """
     result: dict[str, list[dict]] = {}
 
@@ -275,6 +313,23 @@ def _batch_insights(
             )
             batch_requests.append({"method": "GET", "relative_url": relative_url})
 
+        chunk_result = _send_batch_with_retry(client, access_token, chunk, batch_requests, date_preset)
+        result.update(chunk_result)
+
+    return result
+
+
+def _send_batch_with_retry(
+    client: httpx.Client,
+    access_token: str,
+    chunk: list[str],
+    batch_requests: list[dict],
+    date_preset: str = "last_7d",
+) -> dict[str, list[dict]]:
+    """Send a batch request with retries on rate limit. Returns {ad_set_id: [rows]}."""
+    result: dict[str, list[dict]] = {}
+
+    for attempt in range(BATCH_RETRIES + 1):
         _adaptive_wait()
         resp = client.post(
             GRAPH_BASE,
@@ -288,30 +343,43 @@ def _batch_insights(
         _update_usage_from_headers(resp.headers)
 
         if resp.status_code != 200:
-            error_data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+            error_data = {}
+            try:
+                error_data = resp.json()
+            except Exception:
+                pass
             error = error_data.get("error", {})
             code = error.get("code")
-            if code in (17, 32, 4):
-                # Rate limited on batch call — wait and retry this chunk
-                wait = 60
-                logger.warning(f"Batch rate limited (code {code}), waiting {wait}s")
-                time.sleep(wait)
-                # Retry this chunk individually
-                for ad_set_id in chunk:
-                    try:
-                        rows = get_insights_daily(client, access_token, ad_set_id, date_preset)
-                        result[ad_set_id] = rows
-                    except Exception as e:
-                        logger.warning(f"Fallback insight fetch failed for {ad_set_id}: {e}")
-                        result[ad_set_id] = []
-                continue
-            raise Exception(f"Batch API error: {error.get('message', resp.text)} (code={code})")
 
+            if code in (17, 32, 4) and attempt < BATCH_RETRIES:
+                # Exponential backoff: 60s, 120s, 240s — and block all calls globally
+                wait = 60 * (2 ** attempt)
+                _mark_rate_limited(wait)
+                logger.warning(
+                    f"Batch rate limited (code {code}), "
+                    f"global backoff {wait}s — retry {attempt + 1}/{BATCH_RETRIES}"
+                )
+                time.sleep(wait)
+                continue
+
+            # Out of retries — mark all ad sets in chunk as empty
+            logger.error(f"Batch failed after {BATCH_RETRIES} retries: {error.get('message', resp.text)}")
+            for ad_set_id in chunk:
+                result[ad_set_id] = []
+            return result
+
+        _clear_rate_limit()
+
+        # Parse batch responses
         batch_responses = resp.json()
         if not isinstance(batch_responses, list):
             logger.error(f"Unexpected batch response type: {type(batch_responses)}")
-            continue
+            for ad_set_id in chunk:
+                result[ad_set_id] = []
+            return result
 
+        # Check if any individual items in the batch were rate-limited
+        rate_limited_ids = []
         for j, batch_resp in enumerate(batch_responses):
             ad_set_id = chunk[j]
             status = batch_resp.get("code", 0)
@@ -327,10 +395,44 @@ def _batch_insights(
                 result[ad_set_id] = rows
             else:
                 error = body.get("error", {})
-                logger.warning(
-                    f"Batch item {ad_set_id} failed: {error.get('message', f'status {status}')}"
+                err_code = error.get("code")
+                if err_code in (17, 32, 4):
+                    rate_limited_ids.append(ad_set_id)
+                else:
+                    logger.warning(
+                        f"Batch item {ad_set_id} failed: "
+                        f"{error.get('message', f'status {status}')}"
+                    )
+                    result[ad_set_id] = []
+
+        if rate_limited_ids and attempt < BATCH_RETRIES:
+            # Some items rate-limited — wait and retry just those
+            wait = 60 * (2 ** attempt)
+            _mark_rate_limited(wait)
+            logger.warning(
+                f"{len(rate_limited_ids)} batch items rate-limited, "
+                f"global backoff {wait}s — retry {attempt + 1}/{BATCH_RETRIES}"
+            )
+            time.sleep(wait)
+            # Rebuild batch for only the failed items
+            chunk = rate_limited_ids
+            batch_requests = []
+            for ad_set_id in chunk:
+                relative_url = (
+                    f"{ad_set_id}/insights?"
+                    f"fields={INSIGHT_FIELDS}&"
+                    f"date_preset={date_preset}&"
+                    f"time_increment=1"
                 )
+                batch_requests.append({"method": "GET", "relative_url": relative_url})
+            continue
+        elif rate_limited_ids:
+            # Out of retries, mark remaining as empty
+            for ad_set_id in rate_limited_ids:
                 result[ad_set_id] = []
+
+        # All done for this chunk
+        return result
 
     return result
 
