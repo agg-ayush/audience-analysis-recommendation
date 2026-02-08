@@ -5,6 +5,7 @@ from app.models.audience import Audience
 from app.models.metric_snapshot import MetricSnapshot
 from app.models.recommendation import Recommendation
 from app.models.action_log import ActionLog
+from app.models.settings_override import SettingsOverride
 
 __all__ = [
     "Base",
@@ -13,4 +14,5 @@ __all__ = [
     "MetricSnapshot",
     "Recommendation",
     "ActionLog",
+    "SettingsOverride",
 ]

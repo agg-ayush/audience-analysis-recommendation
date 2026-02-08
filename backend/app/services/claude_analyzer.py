@@ -6,6 +6,7 @@ from typing import Any, Optional
 from app.config import get_settings
 from app.models import ActionLog, Audience, Recommendation
 from app.services.rules import run_rules_for_audience
+from app.services.effective_settings import get_effective_settings
 
 
 # ---------------------------------------------------------------------------
@@ -63,11 +64,11 @@ def _generate_reasons(rule_output: dict, audience: Audience, age_days: int) -> l
     return reasons
 
 
-def _generate_risks(rule_output: dict, audience: Audience, age_days: int) -> list[str]:
+def _generate_risks(rule_output: dict, audience: Audience, age_days: int, settings=None) -> list[str]:
     """Flag 0-3 risks from metrics data."""
     metrics = rule_output.get("metrics") or {}
     time_metrics = rule_output.get("time_metrics") or {}
-    settings = get_settings()
+    settings = settings or get_settings()
     risks: list[str] = []
 
     spend = metrics.get("spend") or 0
@@ -103,12 +104,12 @@ def _generate_risks(rule_output: dict, audience: Audience, age_days: int) -> lis
     return risks[:3]  # Cap at 3
 
 
-def _determine_confidence(rule_output: dict, age_days: int) -> str:
+def _determine_confidence(rule_output: dict, age_days: int, settings=None) -> str:
     """Determine HIGH / MEDIUM / LOW confidence from data sufficiency."""
     metrics = rule_output.get("metrics") or {}
     purchases = metrics.get("purchases") or 0
     spend = metrics.get("spend") or 0
-    settings = get_settings()
+    settings = settings or get_settings()
 
     if purchases >= 10 and spend >= settings.min_spend * 3 and age_days >= 7:
         return "HIGH"
@@ -134,11 +135,11 @@ def analyze_one(
             then = then.replace(tzinfo=timezone.utc)
         age_days = (datetime.now(timezone.utc) - then).days
 
-    settings = get_settings()
+    settings = get_effective_settings(db) if db else get_settings()
 
     # Try Claude if API key is available
     if settings.anthropic_api_key:
-        claude_result = _analyze_with_claude(rule_output, audience, age_days)
+        claude_result = _analyze_with_claude(rule_output, audience, age_days, settings=settings)
         if claude_result:
             return claude_result
 
@@ -146,9 +147,9 @@ def analyze_one(
     action = rule_output.get("action", "HOLD")
     return {
         "action": action,
-        "confidence": _determine_confidence(rule_output, age_days),
+        "confidence": _determine_confidence(rule_output, age_days, settings),
         "reasons": _generate_reasons(rule_output, audience, age_days),
-        "risks": _generate_risks(rule_output, audience, age_days),
+        "risks": _generate_risks(rule_output, audience, age_days, settings),
         "scale_percentage": rule_output.get("scale_percentage"),
     }
 
@@ -177,14 +178,14 @@ Respond with a single JSON object (no markdown, no code block) with exactly thes
 """
 
 
-def _analyze_with_claude(rule_output: dict, audience: Audience, age_days: int) -> Optional[dict]:
+def _analyze_with_claude(rule_output: dict, audience: Audience, age_days: int, settings=None) -> Optional[dict]:
     """Call Claude API. Returns dict or None if it fails."""
     try:
         from anthropic import Anthropic
     except ImportError:
         return None
 
-    settings = get_settings()
+    settings = settings or get_settings()
     metrics = rule_output.get("metrics") or {}
     time_metrics = rule_output.get("time_metrics") or {}
     prompt = ANALYSIS_PROMPT_V1.format(

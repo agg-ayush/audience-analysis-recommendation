@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models import Audience, MetricSnapshot, Recommendation
+from app.services.effective_settings import get_effective_settings
 from app.services.metrics import (
     get_account_benchmarks,
     compute_audience_metrics,
@@ -14,8 +15,8 @@ from app.services.metrics import (
 
 
 # --- Performance buckets ---
-def classify_performance(normalized_roas: float, audience_type: str = "") -> str:
-    settings = get_settings()
+def classify_performance(normalized_roas: float, audience_type: str = "", settings=None) -> str:
+    settings = settings or get_settings()
     threshold_winner = settings.winner_threshold
     threshold_loser = settings.loser_threshold
     if audience_type == "BROAD":
@@ -33,8 +34,9 @@ def classify_trend(
     roas_slope: float,
     cpa_volatility: float,
     spend_acceleration: float,
+    settings=None,
 ) -> str:
-    settings = get_settings()
+    settings = settings or get_settings()
     if cpa_volatility > settings.volatile_cpa_std:
         return "VOLATILE"
     if roas_slope > settings.improving_slope:
@@ -61,8 +63,8 @@ DECISION_MATRIX = {
 }
 
 
-def get_scale_percentage(audience_type: str) -> int:
-    settings = get_settings()
+def get_scale_percentage(audience_type: str, settings=None) -> int:
+    settings = settings or get_settings()
     base = settings.max_scale_pct
     if audience_type == "LLA":
         base = min(30, base + settings.lla_scale_pct_bump)
@@ -82,14 +84,14 @@ def apply_guardrails(
     - No PAUSE if spend < MIN_SPEND
     - SCALE capped and cooldown checked (simplified: no scale history table yet)
     """
-    settings = get_settings()
+    settings = get_effective_settings(db)
     spend = metrics.get("spend") or 0
     min_spend = float(settings.min_spend)
 
     if action == "PAUSE" and spend < min_spend:
         return "HOLD", None
     if action == "SCALE":
-        scale_pct = get_scale_percentage(audience.audience_type)
+        scale_pct = get_scale_percentage(audience.audience_type, settings)
         # Cooldown: would need last_scale_at; skip for now or check last recommendation
         last_scale = (
             db.query(Recommendation)
@@ -121,7 +123,7 @@ def run_rules_for_audience(
     Run rule engine for one audience. Returns dict with action, bucket, trend_state,
     scale_percentage, composite_score, metrics, or None if filtered by noise.
     """
-    settings = get_settings()
+    settings = get_effective_settings(db)
     audience = db.query(Audience).filter(Audience.id == audience_id).first()
     if not audience:
         return None
@@ -143,11 +145,13 @@ def run_rules_for_audience(
     bucket = classify_performance(
         metrics.get("normalized_roas") or 0,
         audience.audience_type,
+        settings,
     )
     trend_state = classify_trend(
         time_metrics.get("roas_slope") or 0,
         time_metrics.get("cpa_volatility") or 0,
         time_metrics.get("spend_acceleration") or 1,
+        settings,
     )
     action = DECISION_MATRIX.get((bucket, trend_state), "HOLD")
     action, scale_pct = apply_guardrails(action, audience, db, metrics)

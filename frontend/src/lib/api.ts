@@ -17,6 +17,8 @@ async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
 export const api = {
   getAccounts: () => fetchApi<{ accounts: Account[] }>("/api/accounts"),
   getAccount: (id: string) => fetchApi<Account>(`/api/accounts/${id}`),
+  getSyncStatus: (accountId: string) =>
+    fetchApi<SyncStatus>(`/api/accounts/${accountId}/sync-status`),
   getAudiences: (accountId: string) =>
     fetchApi<Audience[]>(`/api/audiences?account_id=${encodeURIComponent(accountId)}`),
   getAudience: (id: string) => fetchApi<Audience>(`/api/audiences/${id}`),
@@ -33,6 +35,13 @@ export const api = {
       { method: "POST" }
     ),
   getSettings: () => fetchApi<SettingsResponse>("/api/settings"),
+  updateSettings: (settings: Partial<SettingsResponse>) =>
+    fetchApi<SettingsResponse>("/api/settings", {
+      method: "PATCH",
+      body: JSON.stringify(settings),
+    }),
+  resetSettings: () =>
+    fetchApi<SettingsResponse>("/api/settings/reset", { method: "POST" }),
 };
 
 export const metaLoginUrl = () => `${API_BASE}/api/auth/meta/login`;
@@ -77,6 +86,14 @@ export type Recommendation = {
   risks: string[] | null;
   metrics_snapshot: Record<string, unknown> | null;
   generated_at: string;
+};
+
+export type SyncStatus = {
+  last_synced_at: string | null;
+  audience_count: number;
+  snapshot_count: number;
+  audiences_with_data: number;
+  can_generate: boolean;
 };
 
 export type SettingsResponse = {

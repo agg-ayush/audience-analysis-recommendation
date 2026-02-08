@@ -189,7 +189,8 @@ def _graph_get(
             f"Graph API error: {error.get('message', resp.text)} "
             f"(code={code}, status={resp.status_code})"
         )
-    return {}
+    # All retries exhausted without success or explicit error
+    raise Exception("Graph API call failed after all retries")
 
 
 def _parse_actions(insight: dict, action_type: str) -> int:

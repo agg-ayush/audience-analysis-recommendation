@@ -1,4 +1,5 @@
 """APScheduler: periodic sync and outcome logging."""
+import logging
 from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -10,15 +11,20 @@ from app.models import Account, ActionLog, Audience, MetricSnapshot
 from app.services.ingestion import sync_account
 from app.services.metrics import compute_audience_metrics, get_account_benchmarks
 
+logger = logging.getLogger(__name__)
+
 
 def _sync_all_accounts() -> None:
     db = SessionLocal()
     try:
-        for account in db.query(Account).all():
+        accounts = db.query(Account).all()
+        logger.info(f"Scheduled sync: processing {len(accounts)} accounts")
+        for account in accounts:
             try:
                 sync_account(account.id, db)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Scheduled sync failed for account {account.id}: {e}", exc_info=True)
+                db.rollback()
     finally:
         db.close()
 
@@ -47,8 +53,8 @@ def _update_outcome_metrics() -> None:
                         "purchases": metrics.get("purchases"),
                     }
                     log.outcome_3d_at = now
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to compute 3d outcome for log {log.id}: {e}")
         logs_7d = (
             db.query(ActionLog)
             .filter(ActionLog.created_at <= seven_days_ago, ActionLog.outcome_7d_metrics.is_(None))
@@ -66,9 +72,13 @@ def _update_outcome_metrics() -> None:
                         "purchases": metrics.get("purchases"),
                     }
                     log.outcome_7d_at = now
-            except Exception:
-                pass
-        db.commit()
+            except Exception as e:
+                logger.warning(f"Failed to compute 7d outcome for log {log.id}: {e}")
+        try:
+            db.commit()
+        except Exception as e:
+            logger.error(f"Failed to commit outcome metrics: {e}", exc_info=True)
+            db.rollback()
     finally:
         db.close()
 

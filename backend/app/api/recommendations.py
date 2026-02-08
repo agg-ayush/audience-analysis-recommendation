@@ -1,9 +1,10 @@
 """Trigger and fetch recommendations."""
+from sqlalchemy import func as sa_func
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Account, Audience, Recommendation
+from app.models import Account, Audience, MetricSnapshot, Recommendation
 from app.schemas import RecommendationResponse
 from app.utils.cache import (
     cache_get, cache_set, cache_invalidate_prefix,
@@ -56,6 +57,20 @@ async def generate_recommendations(
     account = db.query(Account).filter(Account.id == account_id).first()
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
+
+    # Check if there's enough data to generate
+    audiences_with_data = (
+        db.query(sa_func.count(sa_func.distinct(MetricSnapshot.audience_id)))
+        .join(Audience)
+        .filter(Audience.account_id == account_id, MetricSnapshot.window_days == 7)
+        .scalar() or 0
+    )
+    if audiences_with_data == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No synced data available. Run a sync first to pull audience metrics from Meta.",
+        )
+
     from app.services.claude_analyzer import generate_recommendations_for_account
     try:
         results = generate_recommendations_for_account(db, account_id)

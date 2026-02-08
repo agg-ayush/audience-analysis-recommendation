@@ -37,7 +37,8 @@ class Audience(Base):
         "MetricSnapshot", back_populates="audience", cascade="all, delete-orphan", order_by="MetricSnapshot.snapshot_date"
     )
     recommendations: Mapped[list["Recommendation"]] = relationship(
-        "Recommendation", back_populates="audience", cascade="all, delete-orphan", order_by="Recommendation.generated_at.desc()"
+        "Recommendation", back_populates="audience", cascade="all, delete-orphan",
+        order_by="Recommendation.generated_at",
     )
 
     def __repr__(self) -> str:

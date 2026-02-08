@@ -7,6 +7,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.services.effective_settings import get_effective_settings
 from app.models import Audience, MetricSnapshot
 from app.utils.cache import (
     cache_get, cache_set, _make_key,
@@ -39,7 +40,7 @@ def get_account_benchmarks(db: Session, account_id: str) -> dict:
     if cached is not None:
         return cached
 
-    settings = get_settings()
+    settings = get_effective_settings(db)
     min_spend = float(settings.min_spend)
     audiences = db.query(Audience).filter(Audience.account_id == account_id).all()
     roas_list = []
@@ -57,11 +58,13 @@ def get_account_benchmarks(db: Session, account_id: str) -> dict:
     account_avg_roas = sum(roas_list) / len(roas_list) if roas_list else 1.0
     median_spend = median(spend_list) if spend_list else min_spend
     account_avg_cvr = sum(cvr_list) / len(cvr_list) if cvr_list else 0.01
+    # target_cpa: derive from median spend and median purchases
+    target_cpa = (median_spend / 2) if median_spend > 0 else float(settings.min_spend)
     result = {
         "account_avg_roas": account_avg_roas,
         "median_spend": median_spend,
         "account_avg_cvr": account_avg_cvr,
-        "target_cpa": float(settings.max_daily_budget_increase),  # placeholder; could be per-account
+        "target_cpa": target_cpa,
     }
     cache_set(cache_key, result, TTL_BENCHMARKS)
     return result
@@ -95,15 +98,14 @@ def compute_audience_metrics(
     snap = _get_latest_snapshot(db, audience_id, 7)
     if not snap:
         return None
+    # Resolve account_id if not provided
     if not account_id:
         aud = db.query(Audience).filter(Audience.id == audience_id).first()
         account_id = aud.account_id if aud else None
-    if account_id and not account_benchmarks:
-        account_benchmarks = get_account_benchmarks(db, account_id)
-    elif not account_benchmarks and account_id:
+    if not account_benchmarks and account_id:
         account_benchmarks = get_account_benchmarks(db, account_id)
     if not account_benchmarks:
-        account_benchmarks = {"account_avg_roas": 1.0, "median_spend": get_settings().min_spend, "account_avg_cvr": 0.01}
+        account_benchmarks = {"account_avg_roas": 1.0, "median_spend": float(get_effective_settings(db).min_spend), "account_avg_cvr": 0.01}
 
     account_avg_roas = account_benchmarks["account_avg_roas"]
     median_spend = account_benchmarks["median_spend"]
@@ -118,7 +120,7 @@ def compute_audience_metrics(
     normalized_spend = (spend / median_spend) if median_spend else 0
     normalized_cvr = (cvr / account_avg_cvr) if (cvr and account_avg_cvr) else 0
     # Purchase volume score: cap at 2x median purchase count for 7d
-    acc_id = account_id or (db.query(Audience).filter(Audience.id == audience_id).first().account_id if db.query(Audience).filter(Audience.id == audience_id).first() else None)
+    acc_id = account_id
     all_purchases = []
     if acc_id:
         snaps = db.query(MetricSnapshot).join(Audience).filter(
@@ -129,7 +131,7 @@ def compute_audience_metrics(
     median_purchases = median(all_purchases) if all_purchases else 1
     purchase_volume_score = min(2.0, (purchases / median_purchases) if median_purchases else 0)
 
-    settings = get_settings()
+    settings = get_effective_settings(db)
     composite = (
         normalized_roas * settings.roas_weight
         + normalized_spend * settings.spend_weight

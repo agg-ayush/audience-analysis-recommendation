@@ -1,13 +1,21 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Nav } from "@/components/nav";
 import { RecommendationBadge } from "@/components/recommendation-badge";
-import { api, type Account, type Recommendation } from "@/lib/api";
+import { api, type Account, type Recommendation, type SyncStatus } from "@/lib/api";
 
 export default function DashboardPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-background"><Nav /><main className="mx-auto max-w-6xl px-4 py-6"><p className="text-muted-foreground">Loading…</p></main></div>}>
+      <DashboardContent />
+    </Suspense>
+  );
+}
+
+function DashboardContent() {
   const searchParams = useSearchParams();
   const accountFromUrl = searchParams.get("account");
 
@@ -21,21 +29,31 @@ export default function DashboardPage() {
   const [syncResult, setSyncResult] = useState<{ audiences_created: number; audiences_updated: number; snapshots_created: number; errors: string[] } | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [datePreset, setDatePreset] = useState("last_7d");
+  const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
 
   const loadAccounts = useCallback(() => {
     api
       .getAccounts()
       .then((r) => {
         setAccounts(r.accounts);
-        if (r.accounts.length && !selectedAccountId) {
-          // If account ID came from URL, validate it exists; otherwise fall back to first
+        // Only set initial selection — subsequent changes come from the dropdown
+        setSelectedAccountId((prev) => {
+          if (prev) return prev;
           const urlMatch = accountFromUrl ? r.accounts.find((a) => a.id === accountFromUrl) : null;
-          setSelectedAccountId(urlMatch ? urlMatch.id : r.accounts[0].id);
-        }
+          return urlMatch ? urlMatch.id : r.accounts[0]?.id ?? null;
+        });
       })
       .catch(() => setAccounts([]))
       .finally(() => setLoading(false));
-  }, [selectedAccountId, accountFromUrl]);
+  }, [accountFromUrl]);
+
+  const loadSyncStatus = useCallback(() => {
+    if (!selectedAccountId) {
+      setSyncStatus(null);
+      return;
+    }
+    api.getSyncStatus(selectedAccountId).then(setSyncStatus).catch(() => setSyncStatus(null));
+  }, [selectedAccountId]);
 
   const loadRecommendations = useCallback(() => {
     if (!selectedAccountId) return;
@@ -52,9 +70,14 @@ export default function DashboardPage() {
   }, [loadAccounts]);
 
   useEffect(() => {
-    if (selectedAccountId) loadRecommendations();
-    else setRecommendations([]);
-  }, [selectedAccountId, loadRecommendations]);
+    if (selectedAccountId) {
+      loadRecommendations();
+      loadSyncStatus();
+    } else {
+      setRecommendations([]);
+      setSyncStatus(null);
+    }
+  }, [selectedAccountId, loadRecommendations, loadSyncStatus]);
 
   const handleSync = () => {
     if (!selectedAccountId) return;
@@ -69,6 +92,7 @@ export default function DashboardPage() {
           setErrorMsg(`Sync finished with ${result.errors.length} error(s)`);
         }
         loadRecommendations();
+        loadSyncStatus();
       })
       .catch((e) => setErrorMsg(`Sync failed: ${e.message}`))
       .finally(() => setSyncing(false));
@@ -80,7 +104,10 @@ export default function DashboardPage() {
     setErrorMsg(null);
     api
       .generateRecommendations(selectedAccountId)
-      .then((r) => setRecommendations(r.recommendations))
+      .then((r) => {
+        setRecommendations(r.recommendations);
+        loadSyncStatus();
+      })
       .catch((e) => setErrorMsg(`Generate failed: ${e.message}`))
       .finally(() => setGenerating(false));
   };
@@ -88,6 +115,18 @@ export default function DashboardPage() {
   const winners = recommendations.filter((r) => r.performance_bucket === "WINNER").length;
   const average = recommendations.filter((r) => r.performance_bucket === "AVERAGE").length;
   const losers = recommendations.filter((r) => r.performance_bucket === "LOSER").length;
+  const canGenerate = syncStatus?.can_generate ?? false;
+
+  const formatTimeAgo = (iso: string) => {
+    const diff = Date.now() - new Date(iso).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h ${mins % 60}m ago`;
+    const days = Math.floor(hrs / 24);
+    return `${days}d ${hrs % 24}h ago`;
+  };
 
   return (
     <div className="min-h-screen bg-background">
@@ -128,12 +167,48 @@ export default function DashboardPage() {
           </button>
           <button
             onClick={handleGenerate}
-            disabled={!selectedAccountId || generating}
+            disabled={!selectedAccountId || generating || !canGenerate}
             className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
+            title={!canGenerate ? "Sync data first before generating recommendations" : ""}
           >
             {generating ? "Generating…" : "Generate recommendations"}
           </button>
         </div>
+
+        {selectedAccountId && syncStatus && (
+          <div className="mb-4 flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
+            <span>
+              Last sync:{" "}
+              {syncStatus.last_synced_at ? (
+                <span className="font-medium text-foreground" title={new Date(syncStatus.last_synced_at).toLocaleString()}>
+                  {formatTimeAgo(syncStatus.last_synced_at)}
+                </span>
+              ) : (
+                <span className="font-medium text-amber-600">Never</span>
+              )}
+            </span>
+            <span className="text-border">|</span>
+            <span>
+              Audiences: <span className="font-medium text-foreground">{syncStatus.audience_count}</span>
+            </span>
+            <span className="text-border">|</span>
+            <span>
+              With data: <span className="font-medium text-foreground">{syncStatus.audiences_with_data}</span>
+            </span>
+            {!canGenerate && syncStatus.audience_count > 0 && (
+              <>
+                <span className="text-border">|</span>
+                <span className="text-amber-600">Sync data to enable recommendations</span>
+              </>
+            )}
+            {!canGenerate && syncStatus.audience_count === 0 && (
+              <>
+                <span className="text-border">|</span>
+                <span className="text-amber-600">Sync to pull audiences from Meta</span>
+              </>
+            )}
+          </div>
+        )}
 
         {syncResult && (
           <div className={`mb-4 rounded-lg border p-3 text-sm ${syncResult.errors?.length ? "border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950" : "border-emerald-300 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950"}`}>

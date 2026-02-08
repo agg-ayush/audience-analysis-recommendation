@@ -17,6 +17,7 @@ class AccountCreate(AccountBase):
 class AccountResponse(AccountBase):
     model_config = ConfigDict(from_attributes=True)
     id: str
+    last_synced_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 

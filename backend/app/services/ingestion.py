@@ -216,6 +216,8 @@ def _do_sync(account_id: str, db: Session, date_preset: str) -> dict:
                     db.add(snap)
                     summary["snapshots_created"] += 1
 
+        # Update last_synced_at on the account
+        account.last_synced_at = datetime.now(timezone.utc)
         db.commit()
 
     logger.info(

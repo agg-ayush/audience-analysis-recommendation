@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { Nav } from "@/components/nav";
 import { RecommendationBadge } from "@/components/recommendation-badge";
@@ -11,17 +11,32 @@ export default function HistoryPage() {
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const [loading, setLoading] = useState(true);
+  const [recsLoading, setRecsLoading] = useState(false);
 
+  // Load accounts once on mount
   useEffect(() => {
-    api.getAccounts().then((r) => {
-      setAccounts(r.accounts);
-      if (r.accounts.length && !selectedAccountId) setSelectedAccountId(r.accounts[0].id);
-    }).catch(() => setAccounts([])).finally(() => setLoading(false));
-  }, [selectedAccountId]);
+    api
+      .getAccounts()
+      .then((r) => {
+        setAccounts(r.accounts);
+        if (r.accounts.length) setSelectedAccountId(r.accounts[0].id);
+      })
+      .catch(() => setAccounts([]))
+      .finally(() => setLoading(false));
+  }, []);
 
+  // Load recommendations when account changes
   useEffect(() => {
-    if (!selectedAccountId) return;
-    api.getRecommendations(selectedAccountId).then(setRecommendations).catch(() => setRecommendations([]));
+    if (!selectedAccountId) {
+      setRecommendations([]);
+      return;
+    }
+    setRecsLoading(true);
+    api
+      .getRecommendations(selectedAccountId)
+      .then(setRecommendations)
+      .catch(() => setRecommendations([]))
+      .finally(() => setRecsLoading(false));
   }, [selectedAccountId]);
 
   const byDate = recommendations.reduce<Record<string, Recommendation[]>>((acc, r) => {
@@ -53,6 +68,8 @@ export default function HistoryPage() {
           <p className="text-muted-foreground">Loading…</p>
         ) : !selectedAccountId ? (
           <p className="text-muted-foreground">Select an account.</p>
+        ) : recsLoading ? (
+          <p className="text-muted-foreground">Loading recommendations…</p>
         ) : (
           <div className="space-y-6">
             {dates.map((d) => (
