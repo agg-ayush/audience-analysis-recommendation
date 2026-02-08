@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends
 
 from app.config import get_settings
 from app.schemas import SettingsResponse, SettingsUpdate
+from app.utils.cache import cache_get, cache_set, PREFIX_SETTINGS, TTL_SETTINGS
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -10,8 +11,13 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 @router.get("", response_model=SettingsResponse)
 def get_settings_endpoint():
     """Return current config (from env/config)."""
+    cache_key = PREFIX_SETTINGS + "current"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     s = get_settings()
-    return SettingsResponse(
+    result = SettingsResponse(
         min_spend=s.min_spend,
         min_purchases=s.min_purchases,
         min_age_days=s.min_age_days,
@@ -34,6 +40,8 @@ def get_settings_endpoint():
         interest_days_decline_before_pause=s.interest_days_decline_before_pause,
         custom_max_scale_pct=s.custom_max_scale_pct,
     )
+    cache_set(cache_key, result, TTL_SETTINGS)
+    return result
 
 
 @router.patch("", response_model=SettingsResponse)

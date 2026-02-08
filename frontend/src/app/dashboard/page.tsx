@@ -1,14 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Nav } from "@/components/nav";
 import { RecommendationBadge } from "@/components/recommendation-badge";
 import { api, type Account, type Recommendation } from "@/lib/api";
 
 export default function DashboardPage() {
+  const searchParams = useSearchParams();
+  const accountFromUrl = searchParams.get("account");
+
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
+  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(accountFromUrl);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -23,11 +27,15 @@ export default function DashboardPage() {
       .getAccounts()
       .then((r) => {
         setAccounts(r.accounts);
-        if (r.accounts.length && !selectedAccountId) setSelectedAccountId(r.accounts[0].id);
+        if (r.accounts.length && !selectedAccountId) {
+          // If account ID came from URL, validate it exists; otherwise fall back to first
+          const urlMatch = accountFromUrl ? r.accounts.find((a) => a.id === accountFromUrl) : null;
+          setSelectedAccountId(urlMatch ? urlMatch.id : r.accounts[0].id);
+        }
       })
       .catch(() => setAccounts([]))
       .finally(() => setLoading(false));
-  }, [selectedAccountId]);
+  }, [selectedAccountId, accountFromUrl]);
 
   const loadRecommendations = useCallback(() => {
     if (!selectedAccountId) return;

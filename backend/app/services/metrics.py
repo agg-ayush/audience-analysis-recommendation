@@ -8,6 +8,11 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models import Audience, MetricSnapshot
+from app.utils.cache import (
+    cache_get, cache_set, _make_key,
+    PREFIX_BENCHMARKS, TTL_BENCHMARKS,
+    PREFIX_METRICS, TTL_METRICS,
+)
 
 
 def _get_latest_snapshot(db: Session, audience_id: str, window_days: int = 7) -> Optional[MetricSnapshot]:
@@ -29,6 +34,11 @@ def get_account_benchmarks(db: Session, account_id: str) -> dict:
     Compute account-level benchmarks from audiences with 7d snapshots above MIN_SPEND.
     Returns: account_avg_roas, median_spend, account_avg_cvr, target_cpa (from config).
     """
+    cache_key = PREFIX_BENCHMARKS + _make_key("account", account_id)
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     settings = get_settings()
     min_spend = float(settings.min_spend)
     audiences = db.query(Audience).filter(Audience.account_id == account_id).all()
@@ -47,12 +57,14 @@ def get_account_benchmarks(db: Session, account_id: str) -> dict:
     account_avg_roas = sum(roas_list) / len(roas_list) if roas_list else 1.0
     median_spend = median(spend_list) if spend_list else min_spend
     account_avg_cvr = sum(cvr_list) / len(cvr_list) if cvr_list else 0.01
-    return {
+    result = {
         "account_avg_roas": account_avg_roas,
         "median_spend": median_spend,
         "account_avg_cvr": account_avg_cvr,
         "target_cpa": float(settings.max_daily_budget_increase),  # placeholder; could be per-account
     }
+    cache_set(cache_key, result, TTL_BENCHMARKS)
+    return result
 
 
 def _float_or_none(v) -> Optional[float]:
@@ -75,6 +87,11 @@ def compute_audience_metrics(
     Uses 7d snapshot. If account_benchmarks not provided, fetches using account_id.
     Returns dict with raw + normalized + composite_score, or None if no snapshot.
     """
+    cache_key = PREFIX_METRICS + _make_key("audience", audience_id, account_id)
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     snap = _get_latest_snapshot(db, audience_id, 7)
     if not snap:
         return None
@@ -120,7 +137,7 @@ def compute_audience_metrics(
         + purchase_volume_score * settings.volume_weight
     )
 
-    return {
+    result = {
         "audience_id": audience_id,
         "snapshot_id": snap.id,
         "snapshot_date": snap.snapshot_date,
@@ -141,12 +158,19 @@ def compute_audience_metrics(
         "account_avg_roas": account_avg_roas,
         "median_spend": median_spend,
     }
+    cache_set(cache_key, result, TTL_METRICS)
+    return result
 
 
 def get_time_based_metrics(db: Session, audience_id: str) -> dict:
     """
     Compute ROAS slope, CPA volatility, spend acceleration from daily snapshots (window_days=1).
     """
+    cache_key = PREFIX_METRICS + _make_key("timebased", audience_id)
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     today = date.today()
     snapshots = (
         db.query(MetricSnapshot)
@@ -191,9 +215,11 @@ def get_time_based_metrics(db: Session, audience_id: str) -> dict:
     if len(roas_series) >= 2 and roas_series[-2]:
         dod_roas_change = (roas_series[-1] - roas_series[-2]) / roas_series[-2]
 
-    return {
+    result = {
         "roas_slope": round(roas_slope, 6),
         "cpa_volatility": round(cpa_volatility, 4),
         "spend_acceleration": round(spend_acceleration, 4),
         "dod_roas_change": round(dod_roas_change, 4),
     }
+    cache_set(cache_key, result, TTL_METRICS)
+    return result

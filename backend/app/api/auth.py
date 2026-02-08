@@ -10,6 +10,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.models import Account
 from app.utils.crypto import encrypt_token
+from app.utils.cache import cache_invalidate_prefix, PREFIX_ACCOUNTS
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 settings = get_settings()
@@ -137,6 +138,9 @@ async def meta_callback(code: str | None = None, error: str | None = None, db: S
             )
             db.add(account)
     db.commit()
+
+    # Invalidate accounts cache so the new account shows up immediately
+    cache_invalidate_prefix(PREFIX_ACCOUNTS)
 
     from fastapi.responses import RedirectResponse
     frontend = settings.frontend_url.rstrip("/")

@@ -46,3 +46,18 @@ app.include_router(ingestion.router, prefix="/api")
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/api/cache/stats", tags=["cache"])
+def get_cache_stats():
+    """Return cache statistics (hit rate, key counts)."""
+    from app.utils.cache import cache_stats
+    return cache_stats()
+
+
+@app.post("/api/cache/clear", tags=["cache"])
+def clear_cache():
+    """Clear the entire in-memory cache."""
+    from app.utils.cache import cache_clear
+    count = cache_clear()
+    return {"cleared": count}

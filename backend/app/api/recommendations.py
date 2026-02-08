@@ -5,6 +5,11 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Account, Audience, Recommendation
 from app.schemas import RecommendationResponse
+from app.utils.cache import (
+    cache_get, cache_set, cache_invalidate_prefix,
+    PREFIX_RECOMMENDATIONS, TTL_RECOMMENDATIONS,
+    PREFIX_BENCHMARKS, PREFIX_METRICS, _make_key,
+)
 
 router = APIRouter(prefix="/recommendations", tags=["recommendations"])
 
@@ -16,6 +21,11 @@ def list_recommendations(
     db: Session = Depends(get_db),
 ):
     """List latest recommendations for an account's audiences."""
+    cache_key = PREFIX_RECOMMENDATIONS + _make_key("list", account_id, limit)
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     account = db.query(Account).filter(Account.id == account_id).first()
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
@@ -33,6 +43,7 @@ def list_recommendations(
         data.audience_name = r.audience.name
         data.audience_type = r.audience.audience_type
         out.append(data)
+    cache_set(cache_key, out, TTL_RECOMMENDATIONS)
     return out
 
 
@@ -50,4 +61,10 @@ async def generate_recommendations(
         results = generate_recommendations_for_account(db, account_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    # Invalidate stale caches after new recommendations are generated
+    cache_invalidate_prefix(PREFIX_RECOMMENDATIONS)
+    cache_invalidate_prefix(PREFIX_BENCHMARKS)
+    cache_invalidate_prefix(PREFIX_METRICS)
+
     return {"recommendations": results, "count": len(results)}

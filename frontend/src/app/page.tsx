@@ -42,7 +42,7 @@ export default function Home() {
                 {accounts.map((a) => (
                   <li key={a.id}>
                     {a.account_name || a.meta_account_id}{" "}
-                    <a href="/dashboard" className="text-primary hover:underline">
+                    <a href={`/dashboard?account=${a.id}`} className="text-primary hover:underline">
                       Open dashboard
                     </a>
                   </li>
